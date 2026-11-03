@@ -142,8 +142,8 @@ object AlbumStore {
                 phase = "整理照片中 $done/$cut"
                 onPhaseChanged?.invoke()
                 val outName = n.name
-                // sig 带 v3 前缀:压缩参数升级后强制全量重转一次
-                val sig = "3/${n.src.modified}:${n.src.size}"
+                // sig 带 v4 前缀:黑底画布补齐后强制重编码(只影响输出的那批)
+                val sig = "4/${n.src.modified}:${n.src.size}"
                 val target = File(web, outName)
                 val thumb = File(thumbs, outName)
                 if (sigs[outName] == sig && target.isFile && thumb.isFile) {
@@ -310,7 +310,9 @@ object AlbumStore {
         return out
     }
 
-    /** 原图 80->25 递减压到 MAX_BYTES;高细节照片仍超就逐级降分辨率再压。 */
+    /** 原图 80->25 递减压到 MAX_BYTES;高细节照片仍超就逐级降分辨率,
+     *  再贴到 240x320 黑底画布(与 Mac 版底色一致)——设备端全屏不清屏,
+     *  非 240x320 的图会残留上一张的画面(用户看到的"重叠")。 */
     private fun writeConverted(bmp: Bitmap, target: File, thumb: File) {
         var work = bmp
         var workOwned = false
@@ -321,6 +323,16 @@ object AlbumStore {
             )
             if (workOwned) work.recycle()
             work = next
+            workOwned = true
+            bytes = jpegBytes(work, 80, MAX_BYTES)
+        }
+        if (work.width != W || work.height != H) {
+            val canvas = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888)
+            val c = android.graphics.Canvas(canvas)
+            c.drawColor(android.graphics.Color.rgb(16, 18, 18))
+            c.drawBitmap(work, (W - work.width) / 2f, (H - work.height) / 2f, null)
+            if (workOwned) work.recycle()
+            work = canvas
             workOwned = true
             bytes = jpegBytes(work, 80, MAX_BYTES)
         }
