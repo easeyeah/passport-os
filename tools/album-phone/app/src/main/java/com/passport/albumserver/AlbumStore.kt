@@ -27,9 +27,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 object AlbumStore {
     const val W = 240
     const val H = 320
-    // 设备拉照片按 {18K,12K,8K} 档位分配堆,堆被切碎时只剩 8K 档;
-    // 全部压到 7.5KB(含余量)保证任何堆状态下张张能看,fetch 也更快
-    const val MAX_BYTES = 7680
+    // 设备拉图按实际大小精确分配堆(2026-11-03 晚固件:Content-Length+64B),
+    // 但碎片堆的"最大连续块"会缩水(实测最差 7424B)。照片压 ≤6.5KB,
+    // 6.7KB 的分配请求在最差状态下也拿得到块;超限逐级降分辨率(0.875×)
+    const val MAX_BYTES = 6656
 
     // ---------- 运行状态(UI 与通知轮询读取) ----------
     @Volatile var photoCount = 0
@@ -141,8 +142,8 @@ object AlbumStore {
                 phase = "整理照片中 $done/$cut"
                 onPhaseChanged?.invoke()
                 val outName = n.name
-                // sig 带 v2 前缀:压缩参数升级后强制全量重转一次
-                val sig = "2/${n.src.modified}:${n.src.size}"
+                // sig 带 v3 前缀:压缩参数升级后强制全量重转一次
+                val sig = "3/${n.src.modified}:${n.src.size}"
                 val target = File(web, outName)
                 val thumb = File(thumbs, outName)
                 if (sigs[outName] == sig && target.isFile && thumb.isFile) {

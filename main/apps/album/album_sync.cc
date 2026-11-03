@@ -367,22 +367,14 @@ static esp_http_client_handle_t open_get(const char *url, const char *what) {
     return client;
 }
 
-// GET 到堆缓冲(照片/缩略图共用):按 caps 逐档尝试分配,完整收完且 2xx
-// 才算成功。what 非空时失败原因写入 detail(状态屏可见);缩略图是探测性
-// 请求,传 nullptr 不污染 detail。退出应用的 cancel 会打断长拉取。
+// GET 到堆缓冲(照片/缩略图共用):优先按 Content-Length 精确分配(+64B
+// 余量)——碎片堆里"要多少给多少"远比按档位预占容易成功;长度未知或
+// 分配失败再回退 caps 档位。完整收完且 2xx 才算成功。what 非空时失败
+// 原因写入 detail(状态屏可见);缩略图是探测性请求,传 nullptr 不污染
+// detail。退出应用的 cancel 会打断长拉取。
 static bool fetch_to_heap(const char *url, const size_t *caps, size_t n_caps,
                           const char *what, uint8_t **out_buf, size_t *out_len) {
     if (s_cancel.load()) return false; // 应用退出:立即放弃,别占着堆
-    uint8_t *buf = nullptr;
-    size_t cap = 0;
-    for (size_t i = 0; i < n_caps; ++i) {
-        buf = static_cast<uint8_t *>(malloc(caps[i]));
-        if (buf) { cap = caps[i]; break; }
-    }
-    if (!buf) {
-        if (what) snprintf(s_detail, sizeof(s_detail), "%s缓冲分配失败(堆不足)", what);
-        return false;
-    }
 
     esp_http_client_config_t config = {};
     config.url = url;
@@ -395,8 +387,9 @@ static bool fetch_to_heap(const char *url, const size_t *caps, size_t n_caps,
     config.max_redirection_count = 2;
     if (!strncasecmp(url, "https://", 8)) config.crt_bundle_attach = esp_crt_bundle_attach;
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    size_t used = 0;
-    bool ok = false;
+
+    // 阶段一:建立连接、拿到响应头(含 Content-Length)
+    bool headers_ok = false;
     do {
         if (!client) { if (what) snprintf(s_detail, sizeof(s_detail), "%s client创建失败", what); break; }
         if (esp_http_client_open(client, 0) != ESP_OK) { if (what) snprintf(s_detail, sizeof(s_detail), "%s 连接失败", what); break; }
@@ -406,22 +399,50 @@ static bool fetch_to_heap(const char *url, const size_t *caps, size_t n_caps,
                                what, esp_http_client_get_status_code(client));
             break;
         }
-        ok = true;
-        while (true) {
-            if (s_cancel.load()) { ok = false; break; } // 退出打断,不写 detail
-            if (used >= cap) { if (what) snprintf(s_detail, sizeof(s_detail), "%s超过缓冲档位", what); ok = false; break; }
-            const int n = esp_http_client_read(client, reinterpret_cast<char *>(buf + used),
-                static_cast<int>(cap - used));
-            if (n < 0) { if (what) snprintf(s_detail, sizeof(s_detail), "%s接收错误", what); ok = false; break; }
-            if (n == 0) {
-                ok = esp_http_client_is_complete_data_received(client);
-                if (!ok && what) snprintf(s_detail, sizeof(s_detail), "%s连接提前断开", what);
-                break;
-            }
-            used += static_cast<size_t>(n);
-        }
+        headers_ok = true;
     } while (false);
-    if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
+    if (!headers_ok) {
+        if (client) { esp_http_client_close(client); esp_http_client_cleanup(client); }
+        return false;
+    }
+
+    // 阶段二:精确分配,失败退档位
+    uint8_t *buf = nullptr;
+    size_t cap = 0;
+    const int64_t content_len = esp_http_client_get_content_length(client);
+    if (content_len > 0 && content_len <= 64 * 1024) {
+        buf = static_cast<uint8_t *>(malloc(static_cast<size_t>(content_len) + 64));
+        if (buf) cap = static_cast<size_t>(content_len) + 64;
+    }
+    for (size_t i = 0; !buf && i < n_caps; ++i) {
+        buf = static_cast<uint8_t *>(malloc(caps[i]));
+        if (buf) { cap = caps[i]; break; }
+    }
+    if (!buf) {
+        if (what) snprintf(s_detail, sizeof(s_detail), "%s缓冲分配失败(堆不足)", what);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
+    // 阶段三:收流
+    size_t used = 0;
+    bool ok = false;
+    while (true) {
+        if (s_cancel.load()) { ok = false; break; } // 退出打断,不写 detail
+        if (used >= cap) { if (what) snprintf(s_detail, sizeof(s_detail), "%s超过缓冲档位", what); ok = false; break; }
+        const int n = esp_http_client_read(client, reinterpret_cast<char *>(buf + used),
+            static_cast<int>(cap - used));
+        if (n < 0) { if (what) snprintf(s_detail, sizeof(s_detail), "%s接收错误", what); ok = false; break; }
+        if (n == 0) {
+            ok = esp_http_client_is_complete_data_received(client);
+            if (!ok && what) snprintf(s_detail, sizeof(s_detail), "%s连接提前断开", what);
+            break;
+        }
+        used += static_cast<size_t>(n);
+    }
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
     if (!ok) { free(buf); return false; }
     *out_buf = buf;
     *out_len = used;
