@@ -25,3 +25,6 @@ ui_chars.txt
 # Generated firmware and local validation artifacts
 *.uf2
 *.hex
+
+.zcode/
+tests/font_report.txt

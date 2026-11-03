@@ -23,6 +23,9 @@ done
 "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
     tests/test_tetris.c main/apps/game/tetris_core.c -o "$test_dir/tetris"
 "$test_dir/tetris"
+"${CC:-cc}" -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Imain \
+    tests/test_math24_core.c main/apps/math24/math24_core.c -o "$test_dir/math24"
+"$test_dir/math24"
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -Imain \
     tests/test_terminal.cc -o "$test_dir/terminal"
 "$test_dir/terminal"
@@ -67,14 +70,20 @@ node tests/test_profile_page.js
 node tests/test_portrait_pixels.js
 python3 tests/test_card_gallery.py
 python3 tests/test_avatar_upload.py
+# Apple 的 ld 不认 GCC 的 --gc-sections,等价选项是 -dead_strip。
+home_storage_gc="-Wl,--gc-sections"
+if [[ "$(uname)" == "Darwin" ]]; then home_storage_gc="-Wl,-dead_strip"; fi
 "${CC:-cc}" -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Wno-unused-variable \
     -fsanitize=address,undefined -g -ffunction-sections -fdata-sections \
     -Itests/home_mocks -Itests/radio_mocks -Imain \
-    tests/test_home_storage.c -Wl,--gc-sections -lm -o "$test_dir/home-storage"
+    tests/test_home_storage.c "$home_storage_gc" -lm -o "$test_dir/home-storage"
 "$test_dir/home-storage"
+# Apple clang++ 把 .c 输入当 C++ 编译会触发 -Wdeprecated 错误,cJSON 用 cc 单独编。
+"${CC:-cc}" -std=c11 -fsanitize=address,undefined -g \
+    -c tests/vendor/cjson/cJSON.c -o "$test_dir/cJSON.o"
 "${CXX:-c++}" -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -g \
     -Itests/vendor/cjson -Icomponents/esp-wifi-connect/include \
-    tests/test_phone_time.cc tests/vendor/cjson/cJSON.c -o "$test_dir/phone-time"
+    tests/test_phone_time.cc "$test_dir/cJSON.o" -o "$test_dir/phone-time"
 "$test_dir/phone-time"
 python3 tests/test_city_catalog.py
 python3 tests/test_home_weather.py

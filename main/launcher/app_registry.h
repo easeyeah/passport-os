@@ -43,6 +43,14 @@ void app_registry_log_display_state(void);
 // 活动(app 活动)续期:非按键驱动的应用(如声控游戏)在持续运行时调用,
 // 抑制息屏计时。只刷新计时,不会点亮已熄灭的屏幕。
 void app_registry_keep_awake(void);
+
+// 长按 OK 的"2s 提示/5s 关机"与本次按住解绑:0.8s 的 LONG 被导航消费
+// (全局拦截或相册逐层返回)后,同一次按住不得再触发关机——用户在层级
+// 返回途中持续按住是常态,误关机被当成"设备崩溃"(2026-11-03 真机取证)。
+// 按键扫描任务在每次 OK 按下时 rearm,消费点调用 disarm。
+void app_registry_power_hold_disarm(void);
+void app_registry_power_hold_rearm(void);
+bool app_registry_power_hold_is_disarmed(void);
 // Caller holds LVGL lock. Wake without switching apps; false during handoff.
 bool app_registry_wake_for_notice(void);
 // Caller holds LVGL lock. Never wait for the lifecycle lock or seize audio.

@@ -76,7 +76,11 @@ with tempfile.TemporaryDirectory() as tmp:
     path = Path(tmp) / 'readiness.cpp'
     path.write_text(prelude + register + '}\nstatic bool tick(){bool error=false;do{\n' + gate + '\n}while(false);return error;}\n' + checks)
     cjson = Path(os.environ.get('IDF_PATH', '/opt/esp-idf')) / 'components/json/cJSON'
+    # Apple clang++ 把 .c 输入当 C++ 编译会 -Werror;cJSON 先用 cc 单独编。
+    json_obj = Path(tmp) / 'json.o'
+    subprocess.run(['cc', '-c', '-fsanitize=address,undefined', '-I', str(cjson),
+                    str(cjson / 'cJSON.c'), '-o', str(json_obj)], check=True)
     subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-fsanitize=address,undefined',
-                    '-I', str(cjson), str(path), str(cjson / 'cJSON.c'), '-o', str(path.with_suffix(''))], check=True)
+                    '-I', str(cjson), str(path), str(json_obj), '-o', str(path.with_suffix(''))], check=True)
     subprocess.run([str(path.with_suffix(''))], check=True)
 print('Muse registration delay/rejection/timeout and optional identity gating: PASS')

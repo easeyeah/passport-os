@@ -504,6 +504,7 @@ int main(int argc,char **argv) {
         cjson = Path(os.environ.get('IDF_PATH', '/opt/esp-idf')) / 'components/json/cJSON'
         compiled = subprocess.run([
             os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+            '-Wno-deprecated-declarations', # macOS SDK 弃用 sprintf,三方 cJSON 挡不住
             '-I', str(cjson), '-I', str(ROOT / 'tests/muse_mocks'), '-I', str(ROOT / 'components/passport_muse/sdk'),
             '-fsanitize=address,undefined', str(c), str(ROOT / 'components/passport_muse/voice_helpers.c'), str(cjson / 'cJSON.c'), '-o', str(cls.binary)
         ], capture_output=True, text=True)

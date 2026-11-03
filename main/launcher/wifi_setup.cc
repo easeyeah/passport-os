@@ -38,9 +38,14 @@ void wifi_setup_init(void) {}
 void wifi_setup_start(void) {
     s_active = true;
     home_profile_init();
-    if (SsidManager::GetInstance().GetSsidList().empty()) s_required = true;
     auto &wifi = WifiManager::GetInstance();
-    wifi.StartConfigAp(true); // DNS/AP only; one shared HTTP server owns the full flow.
+    // 设备已联网时不切热点:直接在局域网开放设置页,手机连着家里 Wi-Fi 就能
+    // 改资料/城市/名片。只有未联网才走完整配网流程(AP + captive DNS)。
+    const bool lan_mode = !wifi.IsConfigMode() && wifi.IsConnected();
+    if (!lan_mode) {
+        if (SsidManager::GetInstance().GetSsidList().empty()) s_required = true;
+        wifi.StartConfigAp(true); // DNS/AP only; one shared HTTP server owns the full flow.
+    }
     const auto err = home_upload_start();
     bsp_lvgl_lock(-1);
     s_screen = lv_obj_create(nullptr);
@@ -50,17 +55,27 @@ void wifi_setup_start(void) {
     auto *name=ui_pixel_label(top,"手机设置",&buddy_font_16,UI_TEXT);lv_obj_align(name,LV_ALIGN_LEFT_MID,12,0);
     s_battery=ui_pixel_battery_create(top,206,6,UI_TEXT,&lv_font_montserrat_14);
     ui_pixel_battery_set(&s_battery,bsp_battery_soc());s_battery_tick=lv_tick_get();
-    auto *welcome = line(s_required?"欢迎使用 AI Passport OS":"用手机完成设置",44,UI_TEXT,&ui_font_20);
-    // The complete product name needs slightly more than the usual 216px row.
-    lv_obj_set_pos(welcome, 8, 44);
-    lv_obj_set_width(welcome, 224);
-    line("1 连接设备热点",84,UI_TEXT_DIM);
-    line(wifi.GetApSsid().c_str(),112,UI_ACCENT,&lv_font_montserrat_14);
-    line("2 手机浏览器打开",158,UI_TEXT_DIM);
-    line("192.168.4.1",190,UI_ACCENT,&lv_font_montserrat_32);
-    s_status=line(err==ESP_OK?"提示无互联网时选保留":"服务未启动，确定重试",242,UI_TEXT_DIM);
-    lv_obj_set_height(s_status,22);lv_label_set_long_mode(s_status,LV_LABEL_LONG_DOT);
-    ui_pixel_footer(s_screen,"配网、资料、名片一起设置",s_required?"长按确定跳过配网":"长按确定返回首页",&buddy_font_16);
+    if (lan_mode) {
+        line("已联网 · 无需热点",44,UI_TEXT,&ui_font_20);
+        line("1 手机和设备连同一网络",84,UI_TEXT_DIM);
+        line("2 手机浏览器打开",158,UI_TEXT_DIM);
+        line(err == ESP_OK ? home_upload_url() + 7 : "服务未启动",190,UI_ACCENT,&lv_font_montserrat_20);
+        s_status=line("改完保存，设备自动返回首页",242,UI_TEXT_DIM);
+        lv_obj_set_height(s_status,22);lv_label_set_long_mode(s_status,LV_LABEL_LONG_DOT);
+        ui_pixel_footer(s_screen,"改资料、城市、名片","长按确定返回首页",&buddy_font_16);
+    } else {
+        auto *welcome = line(s_required?"欢迎使用 AI Passport OS":"用手机完成设置",44,UI_TEXT,&ui_font_20);
+        // The complete product name needs slightly more than the usual 216px row.
+        lv_obj_set_pos(welcome, 8, 44);
+        lv_obj_set_width(welcome, 224);
+        line("1 连接设备热点",84,UI_TEXT_DIM);
+        line(wifi.GetApSsid().c_str(),112,UI_ACCENT,&lv_font_montserrat_14);
+        line("2 手机浏览器打开",158,UI_TEXT_DIM);
+        line("192.168.4.1",190,UI_ACCENT,&lv_font_montserrat_32);
+        s_status=line(err==ESP_OK?"提示无互联网时选保留":"服务未启动，确定重试",242,UI_TEXT_DIM);
+        lv_obj_set_height(s_status,22);lv_label_set_long_mode(s_status,LV_LABEL_LONG_DOT);
+        ui_pixel_footer(s_screen,"配网、资料、名片一起设置",s_required?"长按确定跳过配网":"长按确定返回首页",&buddy_font_16);
+    }
     lv_screen_load(s_screen);
     bsp_lvgl_unlock();
     app_registry_keep_awake();
@@ -69,8 +84,11 @@ void wifi_setup_start(void) {
 void wifi_setup_stop(void) {
     s_active = false;
     home_upload_stop();
-    WifiManager::GetInstance().StopConfigAp();
-    if (!SsidManager::GetInstance().GetSsidList().empty()) WifiManager::GetInstance().StartStation();
+    // 局域网模式没有开热点,也别动 STA:停掉 AP/重启 STA 会无谓地断开家里 Wi-Fi。
+    if (WifiManager::GetInstance().IsConfigMode()) {
+        WifiManager::GetInstance().StopConfigAp();
+        if (!SsidManager::GetInstance().GetSsidList().empty()) WifiManager::GetInstance().StartStation();
+    }
     bsp_lvgl_lock(-1);
     if (s_screen) lv_obj_delete(s_screen);
     s_screen = s_status = nullptr;
@@ -105,7 +123,8 @@ void wifi_setup_tick(void) {
         if(s_screen&&lv_tick_get()-s_battery_tick>=5000){ui_pixel_battery_set(&s_battery,bsp_battery_soc());s_battery_tick=lv_tick_get();}
         if (s_status) ui_pixel_label_set_text(s_status, home_upload_busy() ? "正在连接，请保持热点" :
                     home_upload_network_verified() ? "联网成功，手机继续设置" :
-                    home_upload_active() ? "提示无互联网时选保留" : "服务未启动，确定重试");
+                    home_upload_active() ? (WifiManager::GetInstance().IsConfigMode() ?
+                        "提示无互联网时选保留" : "已联网，手机打开地址即可") : "服务未启动，确定重试");
         bsp_lvgl_unlock();
     }
 }

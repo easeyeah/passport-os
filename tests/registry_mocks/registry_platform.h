@@ -54,6 +54,9 @@ inline void lv_timer_pause(lv_timer_t *p){p->paused=true;}
 inline void lv_timer_resume(lv_timer_t *p){p->paused=false;}
 inline void lv_timer_ready(lv_timer_t*){}
 inline void lv_obj_invalidate(lv_obj_t*){}
+// LVGL 9 计数制失效开关:mock 固定为已启用,switch_to 的夹逼复位无副作用。
+inline bool lv_display_is_invalidation_enabled(lv_display_t*){return true;}
+inline void lv_display_enable_invalidation(lv_display_t*,bool){}
 inline int lv_color_hex(int x){return x;}
 inline void lv_obj_set_style_bg_color(lv_obj_t*,int,int){}
 inline void lv_obj_set_style_bg_opa(lv_obj_t*,int,int){}

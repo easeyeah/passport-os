@@ -207,15 +207,14 @@ void draw_app_icon(passport_app_id_t id, uint32_t color) {
             set_part(4, 52, 35, 16, 18, detail);
             set_part(5, 22, 56, 16, 18, warm);
             break;
-        case APP_ID_GAME:
-            // 你在狗叫什么: 像素狗头(柴犬大脸 + 双折耳 + 眼鼻 + 汪汪大嘴)
-            set_frame(0, 16, 26, 52, 38, color, 4);   // 狗脸主体
-            set_part(1, 10, 18, 14, 16, color);       // 左耳
-            set_part(2, 60, 18, 14, 16, color);       // 右耳
-            set_part(3, 26, 36, 8, 8, color);         // 左眼
-            set_part(4, 50, 36, 8, 8, color);         // 右眼
-            set_part(5, 38, 44, 8, 6, color);         // 黑鼻头
-            set_part(6, 32, 54, 20, 8, color);        // 汪汪张开的大嘴
+        case APP_ID_ALBUM:
+            // 相册:描边相纸 + 左上太阳 + 右侧阶梯山(与其它图标的方块语言一致)
+            set_frame(0, 14, 14, 60, 60, color, 4);   // 相纸描边
+            set_part(1, 22, 22, 12, 12, warm);        // 太阳
+            set_part(2, 22, 52, 12, 12, color);       // 山基座
+            set_part(3, 34, 44, 12, 20, color);       // 山阶
+            set_part(4, 46, 36, 12, 28, color);       // 山阶(高)
+            set_part(5, 58, 28, 8, 36, color);        // 主峰
             break;
         case APP_ID_SOUND_JUMP:
             // Same four-legged Claude silhouette as the game, matching theme in launcher.
@@ -263,6 +262,17 @@ void draw_app_icon(passport_app_id_t id, uint32_t color) {
             set_part(8, 58, 34, 10, 10, color);
             set_part(9, 40, 58, 38, 10, color);       // I 长条
             break;
+        case APP_ID_MATH24:
+            // 速算24:用同款积木笔画拼出"24"
+            set_part(0, 18, 14, 34, 10, color);       // 2 上横
+            set_part(1, 42, 24, 10, 12, color);       // 2 右上竖
+            set_part(2, 18, 34, 34, 10, color);       // 2 中横
+            set_part(3, 18, 44, 10, 12, color);       // 2 左下竖
+            set_part(4, 18, 56, 34, 10, color);       // 2 下横
+            set_part(5, 58, 22, 10, 24, color);       // 4 左竖(上半)
+            set_part(6, 58, 40, 24, 10, color);       // 4 中横
+            set_part(7, 72, 22, 10, 40, color);       // 4 右竖
+            break;
         default:
             break;
     }
@@ -279,9 +289,10 @@ void update_card_content() {
     uint32_t color = kPhos;
     if (ui_theme_is_multicolor()) {
         switch (app->id) {
-            case APP_ID_RADIO: case APP_ID_GAME: case APP_ID_POMODORO: color = UI_TERTIARY; break;
+            case APP_ID_RADIO: case APP_ID_POMODORO: color = UI_TERTIARY; break;
             case APP_ID_VOICE: case APP_ID_TETRIS: color = UI_SECONDARY; break;
-            case APP_ID_XIAOZHI: case APP_ID_STOPWATCH: color = UI_SUCCESS; break;
+            case APP_ID_XIAOZHI: case APP_ID_STOPWATCH: case APP_ID_ALBUM: color = UI_SUCCESS; break;
+            case APP_ID_MATH24: color = UI_WARNING; break;
             default: break;
         }
         ui_pixel_text_color(s_app_title, color);

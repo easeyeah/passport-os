@@ -18,7 +18,7 @@
 
 namespace {
 
-constexpr char kTag[] = "radio_catalog";
+[[maybe_unused]] constexpr char kTag[] = "radio_catalog"; // 主机 mock 下 ESP_LOG 为空,避免 -Wunused
 constexpr char kLocationUrl[] =
     "http://ip-api.com/json/?fields=status,countryCode,regionName,city";
 constexpr char kBackupLocationUrl[] =

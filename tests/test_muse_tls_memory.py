@@ -84,9 +84,29 @@ int main(){
     assert(heap_allocs==heap_frees);
 }
 '''.replace('#include <limits>','#include <limits>\n#include <initializer_list>'))
-    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g',
-      '-I'+str(d),'-I'+str(root/'components/passport_muse/sdk'),
-      str(root/'components/passport_muse/sdk/muse_tls_memory.cpp'),str(d/'heap.cpp'),str(d/'sdk.cpp'),str(d/'test.cpp'),
-      '-Wl,--wrap=esp_mbedtls_mem_calloc','-Wl,--wrap=esp_mbedtls_mem_free','-o',str(d/'test')],check=True)
+    common=['c++','-std=c++17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g',
+            '-I'+str(d),'-I'+str(root/'components/passport_muse/sdk')]
+    sources=[str(root/'components/passport_muse/sdk/muse_tls_memory.cpp'),str(d/'heap.cpp'),str(d/'sdk.cpp'),str(d/'test.cpp')]
+    import sys
+    if sys.platform=='darwin':
+        # Apple ld 没有 --wrap:heap.cpp 的"真身"改名为 real_*,其余编译单元
+        # 的调用点改到 __wrap_,__real_ 直接指到 real_*。注意宏不能级联
+        # (real→esp→wrap 会自我递归),三个名字互不重叠。
+        heap_defines=['-Desp_mbedtls_mem_calloc=real_esp_mbedtls_mem_calloc',
+                      '-Desp_mbedtls_mem_free=real_esp_mbedtls_mem_free']
+        wrap_defines=['-Desp_mbedtls_mem_calloc=__wrap_esp_mbedtls_mem_calloc',
+                      '-Desp_mbedtls_mem_free=__wrap_esp_mbedtls_mem_free',
+                      '-D__real_esp_mbedtls_mem_calloc=real_esp_mbedtls_mem_calloc',
+                      '-D__real_esp_mbedtls_mem_free=real_esp_mbedtls_mem_free']
+        objs=[]
+        for src in sources:
+            obj=str(d/(Path(src).stem+'.o'))
+            extra=heap_defines if src.endswith('heap.cpp') else wrap_defines
+            subprocess.run(common+extra+['-c',src,'-o',obj],check=True)
+            objs.append(obj)
+        subprocess.run(['c++','-fsanitize=address,undefined']+objs+['-o',str(d/'test')],check=True)
+    else:
+        subprocess.run(common+sources+
+          ['-Wl,--wrap=esp_mbedtls_mem_calloc','-Wl,--wrap=esp_mbedtls_mem_free','-o',str(d/'test')],check=True)
     subprocess.run([str(d/'test')],check=True)
 print('Muse TLS fixed storage: 1000 sessions, exclusive ownership, erasure, bounds, unrelated TLS passthrough: PASS')

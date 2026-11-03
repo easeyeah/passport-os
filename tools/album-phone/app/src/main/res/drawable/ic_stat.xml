@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知栏小图标:白色照片相框(山+太阳),纯白+透明,符合系统通知图标规范 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 相框外圈(evenOdd 挖出内孔) -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M3,4 h18 a1,1 0 0 1 1,1 v14 a1,1 0 0 1 -1,1 H3 a1,1 0 0 1 -1,-1 V5 a1,1 0 0 1 1,-1 z M4,6 h16 v12 H4 z" />
+    <!-- 太阳 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M15.5,7 a2,2 0 1 0 0.001,0 z" />
+    <!-- 山 -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M6,17 l4,-6 3,4 2,-2 3,4 z" />
+</vector>

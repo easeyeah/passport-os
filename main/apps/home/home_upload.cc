@@ -1,6 +1,7 @@
 #include "apps/home/home_upload.h"
 
 #include "apps/home/home_profile.h"
+#include "apps/album/album_sync.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include <esp_random.h>      // esp_fill_random():每次开启上传窗口换一个一次性 token
@@ -79,16 +80,22 @@ static esp_err_t send_json(httpd_req_t *req, int status, const char *json) {
 
 static esp_err_t handler_captive(httpd_req_t *req) {
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    // 局域网模式下 s_url 是设备 STA 地址;热点模式下与旧的 192.168.4.1 相同。
+    httpd_resp_set_hdr(req, "Location", s_url[0] ? s_url : "http://192.168.4.1/");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, max-age=0");
     return httpd_resp_send(req, nullptr, 0);
 }
 
 static esp_err_t handler_index(httpd_req_t *req) {
-    char host[64];
-    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK ||
-        (strcmp(host, "192.168.4.1") && strcmp(host, "192.168.4.1:80")))
-        return handler_captive(req);
+    // Host 白名单 + 强跳只属于热点模式的 captive portal:手机弹的"登录网络"
+    // 页靠它落到设置页。局域网直连没有 captive DNS,手机就是拿设备 IP 访问的,
+    // 直接出页面即可(写操作仍受一次性 token 保护)。
+    if (WifiManager::GetInstance().IsConfigMode()) {
+        char host[64];
+        if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK ||
+            (strcmp(host, "192.168.4.1") && strcmp(host, "192.168.4.1:80")))
+            return handler_captive(req);
+    }
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, max-age=0");
     // 先把一次性 token 注入成 window.__T,再原样输出页面 —— 用分块发送避免
@@ -237,6 +244,44 @@ static esp_err_t handler_muse_post(httpd_req_t *req) {
     std::memset(body, 0, sizeof(body));
     if (err == ESP_OK) return send_muse_config(req);
     return send_json(req, 400, err == ESP_ERR_INVALID_STATE ? "{\"error\":\"muse_active\"}" : "{\"error\":\"muse_config\"}");
+}
+
+// 相册服务器地址:页面填 URL,设备相册 App 据此同步。空串 = 不启用。
+static esp_err_t reply_object(httpd_req_t *req, cJSON *root); // 定义在 Wi-Fi 配网处理器区
+
+static esp_err_t handler_album_get(httpd_req_t *req) {
+    if (!token_ok(req)) return send_json(req, 401, "{\"error\":\"unauthorized\"}");
+    cJSON *obj = cJSON_CreateObject();
+    if (!obj) return send_json(req, 500, "{\"error\":\"no_memory\"}");
+    cJSON_AddStringToObject(obj, "url", album_sync_url());
+    return reply_object(req, obj);
+}
+
+static esp_err_t handler_album_post(httpd_req_t *req) {
+    if (!token_ok(req)) return send_json(req, 401, "{\"error\":\"unauthorized\"}");
+    char body[192];
+    if (req->content_len <= 0 || req->content_len >= (int)sizeof(body)) return send_json(req, 400, "{\"error\":\"bad size\"}");
+    int received = 0;
+    while (received < req->content_len) {
+        int n = httpd_req_recv(req, body + received, req->content_len - received);
+        if (n <= 0) return send_json(req, 400, "{\"error\":\"recv\"}");
+        received += n;
+    }
+    body[received] = 0;
+    cJSON *obj = cJSON_Parse(body);
+    const cJSON *url = obj ? cJSON_GetObjectItemCaseSensitive(obj, "url") : NULL;
+    // 页面恒发 {"url":"..."}(空串=清除);判 url 字段本身,别误判根对象。
+    const esp_err_t err = (url && cJSON_IsString(url) && url->valuestring)
+        ? album_sync_set_url(url->valuestring)
+        : ESP_ERR_INVALID_ARG;
+    cJSON_Delete(obj);
+    std::memset(body, 0, sizeof(body));
+    if (err != ESP_OK) return send_json(req, 400, "{\"error\":\"album_url\"}");
+    cJSON *reply = cJSON_CreateObject();
+    if (!reply) return send_json(req, 500, "{\"error\":\"no_memory\"}");
+    cJSON_AddBoolToObject(reply, "ok", true);
+    cJSON_AddStringToObject(reply, "url", album_sync_url());
+    return reply_object(req, reply);
 }
 
 static esp_err_t handler_avatar_get(httpd_req_t *req) {
@@ -550,7 +595,10 @@ static esp_err_t handler_finish(httpd_req_t *req) {
 
 esp_err_t home_upload_start(void) {
     if (s_server) return ESP_OK;
-    if (!WifiManager::GetInstance().IsConfigMode()) return ESP_ERR_INVALID_STATE;
+    // 两种模式可开:配网热点(手机连 Passport-WiFi),或已联网的 STA——
+    // 后者手机与设备同网即可改资料/城市,不必离开家里 Wi-Fi 再连设备热点。
+    auto &wifi = WifiManager::GetInstance();
+    if (!wifi.IsConfigMode() && !wifi.IsConnected()) return ESP_ERR_INVALID_STATE;
     s_network_state = 0; s_finish_at = 0; s_target_ssid.clear();
     s_saved_networks = SsidManager::GetInstance().GetSsidList();
     s_had_saved = !s_saved_networks.empty();
@@ -564,7 +612,7 @@ esp_err_t home_upload_start(void) {
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 17;
+    config.max_uri_handlers = 19;
     // 10 lwIP sockets total: leave room for DNS, SNTP, control/listen sockets,
     // and a new accept before LRU eviction. Phone OS probes also use HTTP.
     config.max_open_sockets = 3;
@@ -596,6 +644,8 @@ esp_err_t home_upload_start(void) {
     const httpd_uri_t finish_uri = {"/api/finish", HTTP_POST, handler_finish, NULL};
     const httpd_uri_t muse_get = {"/api/muse", HTTP_GET, handler_muse_get, NULL};
     const httpd_uri_t muse_post = {"/api/muse", HTTP_POST, handler_muse_post, NULL};
+    const httpd_uri_t album_get = {"/api/album", HTTP_GET, handler_album_get, NULL};
+    const httpd_uri_t album_post = {"/api/album", HTTP_POST, handler_album_post, NULL};
     const httpd_uri_t captive_uri = {"/*", HTTP_GET, handler_captive, NULL};
     // 2026-09-13 修复(B8):注册返回值必须检查。原来四个 handler 全丢返回值,
     // 注册失败时页面直接 404 且日志里一行痕迹都没有。
@@ -607,6 +657,7 @@ esp_err_t home_upload_start(void) {
         {&setup_uri, "GET /api/setup"}, {&networks_uri, "GET /api/networks"},
         {&connect_uri, "POST /api/connect"}, {&finish_uri, "POST /api/finish"},
         {&muse_get, "GET /api/muse"}, {&muse_post, "POST /api/muse"},
+        {&album_get, "GET /api/album"}, {&album_post, "POST /api/album"},
         {&captive_uri, "captive portal"},
     };
     for (const auto &r : routes) {
@@ -620,8 +671,11 @@ esp_err_t home_upload_start(void) {
         }
     }
 
-    snprintf(s_url, sizeof(s_url), "http://%s",
-             "192.168.4.1");
+    if (wifi.IsConfigMode()) {
+        snprintf(s_url, sizeof(s_url), "http://%s", "192.168.4.1");
+    } else {
+        snprintf(s_url, sizeof(s_url), "http://%s", wifi.GetIpAddress().c_str());
+    }
     ESP_LOGI(TAG, "Upload server started at %s", s_url);
     return ESP_OK;
 }

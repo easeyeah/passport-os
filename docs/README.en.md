@@ -4,15 +4,15 @@
 
 **A small device worth keeping in your daily routine.**
 
-Community firmware for the FoloToy AI Passport, based on ESP32-C3 with 8 MB Flash. It brings ten apps together with shared settings, Wi-Fi setup, themes, audio, battery reporting, and power management.
+Community firmware for the FoloToy AI Passport, based on ESP32-C3 with 8 MB Flash. It brings eleven apps together with shared settings, Wi-Fi setup, themes, audio, battery reporting, and power management.
 
 ## Why this project exists
 
-Thank you to everyone who has enjoyed the project and shared feedback. I started Passport OS to make a small device I would use regularly, then selected ten functions and apps through repeated experiments.
+Thank you to everyone who has enjoyed the project and shared feedback. I started Passport OS to make a small device I would use regularly, then selected eleven functions and apps through repeated experiments.
 
 People have suggested many personal improvements. Because everyone uses the hardware differently, sharing the source lets you add what you need, remove what you do not, and make a version that fits you. Have fun using and modifying it.
 
-## Ten apps
+## Eleven apps
 
 | App | What it does | Requirements |
 | --- | --- | --- |
@@ -21,11 +21,12 @@ People have suggested many personal improvements. Because everyone uses the hard
 | AI Voice | Hardware microphone and configurable desktop hotkeys | Windows companion program |
 | Xiaozhi AI | Spoken conversations through the microphone and speaker | Network and Xiaozhi service configuration |
 | Muse | Send voice messages and read replies on screen | Phone pairing, your own account, and a working network |
-| Why Barking | A sound-controlled game | Works offline |
 | Sound Jump | Longer sounds jump farther; release your voice to jump | Works offline |
 | Tetris | Stack blocks and clear lines | Works offline |
+| Math24 | Combine four numbers with + − × ÷ to make 24, with undo and full solutions | Works offline |
 | Stopwatch | Timing, splits, pause, and resume | Works offline |
 | Pomodoro | Focus sessions, breaks, and completion chimes | Works offline |
+| Album | Sync photos from an album source and browse them on the device | Wi-Fi and a working album source |
 
 ## Related projects
 

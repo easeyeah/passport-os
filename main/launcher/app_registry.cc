@@ -10,6 +10,10 @@
 #include "bsp_button.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+
+// 相册加载/渲染未完成时,长按确定的退出推迟到加载完成自动续办
+// (用户要求:加载中不退出)。相册侧实现见 apps/album/app_album.cc。
+extern "C" bool album_ui_busy(void);
 #include "esp_system.h"
 #include "esp_attr.h"
 #include "lvgl.h"
@@ -34,12 +38,15 @@ extern const passport_app_t g_xiaozhi_app;
 extern const passport_app_t g_wifi_app;
 extern const passport_app_t g_settings_app;
 extern const passport_app_t g_home_app;
-extern const passport_app_t g_game_app;
+// g_game_app(你在狗叫什么)已于 2026-11-01 下线:不进轮播、不编译进固件,
+// 枚举位保留避免后续 ID 位移。源码仍在 main/apps/game/。
 extern const passport_app_t g_tetris_app;
 extern const passport_app_t g_stopwatch_app;
 extern const passport_app_t g_sound_jump_app;
 extern const passport_app_t g_muse_app;
 extern const passport_app_t g_pomodoro_app;
+extern const passport_app_t g_album_app;
+extern const passport_app_t g_math24_app;
 
 namespace {
 
@@ -52,18 +59,20 @@ const passport_app_t *s_apps[] = {
     &g_voice_app,
     &g_xiaozhi_app,
     &g_muse_app,
-    &g_game_app,
     &g_sound_jump_app,
     &g_tetris_app,
     &g_stopwatch_app,
     &g_pomodoro_app,
+    &g_album_app,
+    &g_math24_app,
     &g_settings_app,   // 设置放最后(应用惯用收尾位置)
 };
 
 constexpr size_t kAppCount = sizeof(s_apps) / sizeof(s_apps[0]);
 bool feedback_allowed(passport_app_id_t id) {
     return id == APP_ID_HOME || id == APP_ID_LAUNCHER || id == APP_ID_SETTINGS ||
-           id == APP_ID_WIFI || id == APP_ID_STOPWATCH || id == APP_ID_POMODORO || id == APP_ID_TETRIS;
+           id == APP_ID_WIFI || id == APP_ID_STOPWATCH || id == APP_ID_POMODORO || id == APP_ID_TETRIS ||
+           id == APP_ID_ALBUM || id == APP_ID_MATH24;
 }
 std::atomic<passport_app_id_t> s_active_id{APP_ID_LAUNCHER};
 wake_gate_t s_wake_gate{};
@@ -92,12 +101,16 @@ struct SwitchGuard {
 // 按前台应用选择 Wi-Fi 省电档:流媒体/语音需要即时下行,保持 MIN modem sleep;
 // 桌面/首页/设置等待机前台放宽到 MAX modem sleep(下行延迟可到 ~1s,对
 // 天气/SNTP/上传服务无感),是待机电流的最大单项优化。
+// 手机设置例外:局域网模式下 STA 链路直接给手机传设置页,MAX 省电会把
+// 吞吐压到几 KB/s,手机浏览器等不到页面就放弃,所以保持均衡档。
 WifiPowerSaveLevel power_save_level_for(passport_app_id_t id) {
     switch (id) {
         case APP_ID_RADIO:
         case APP_ID_VOICE:
         case APP_ID_XIAOZHI:
         case APP_ID_MUSE:
+        case APP_ID_WIFI:
+        case APP_ID_ALBUM:
             return WifiPowerSaveLevel::BALANCED;
         default:
             return WifiPowerSaveLevel::LOW_POWER;
@@ -167,6 +180,12 @@ std::atomic<uint16_t> s_screen_timeout_seconds{60};
 
 // 长按 OK 强制返回标志
 bool s_ok_long_triggered = false;
+
+// "继续按住关机"与本次按住的解绑标志。生命周期:按键扫描任务在 OK 按下
+// 瞬间 rearm → dispatch_key 在 LONG 被导航消费的瞬间 disarm → 扫描任务
+// 在 2s/5s 阶段点读取。跨任务单写多读,原子量足够;误置最多吞掉一次
+// 关机意图(松手重按即恢复),比误关机便宜得多。
+std::atomic<bool> s_power_hold_disarmed{false};
 
 // Keep the last image in the panel while releasing the old LVGL tree. This
 // empty screen exists only to keep LVGL's active pointer valid; never draw it.
@@ -276,6 +295,10 @@ void show_clean_launch_notice(passport_app_id_t id) {
 
 } // namespace
 
+extern "C" void app_registry_power_hold_disarm(void) { s_power_hold_disarmed = true; }
+extern "C" void app_registry_power_hold_rearm(void) { s_power_hold_disarmed = false; }
+extern "C" bool app_registry_power_hold_is_disarmed(void) { return s_power_hold_disarmed.load(); }
+
 void app_registry_init(void) {
     ESP_LOGI(TAG, "Initializing app registry with %u apps...", (unsigned)kAppCount);
     if (!s_switch_mutex) s_switch_mutex = xSemaphoreCreateRecursiveMutex();
@@ -286,6 +309,8 @@ void app_registry_init(void) {
     lv_display_add_event_cb(lv_display_get_default(), display_refresh_guard, LV_EVENT_FLUSH_START, nullptr);
     lv_display_add_event_cb(lv_display_get_default(), display_refresh_guard, LV_EVENT_SCREEN_LOADED, nullptr);
     bsp_lvgl_unlock();
+    // (taskLVGL 不再挂 WDT:它从不喂狗,健康时也会每 5s 触发转储,
+    //  纯噪声且无取证价值——转储只含当前运行的 IDLE 任务。)
     s_last_activity_us.store(esp_timer_get_time(), std::memory_order_release);
     s_active_id = APP_ID_LAUNCHER;
     // 不在这里初始化/加载 Launcher 界面:开机直接由 main 走开机动画后进首页,
@@ -383,6 +408,19 @@ void app_registry_switch_to(passport_app_id_t id) {
         launcher_ui_hide();
     }
 
+    // LVGL 失效开关全局复位(2026-11-03):enable_invalidation 是计数制,
+    // 应用可能带着"失效关闭"离场(首页分享视图开→长按下切走;相册直推
+    // 计数漂移)——下一个应用的 LVGL 界面从此不再重绘,面板永远残留旧帧,
+    // 表现为"按键没反应"。切换是系统级边界,在此把计数夹回开启;此刻旧
+    // 应用已完全停止,面板单写者成立。只补到 1,不过度递增。
+    {
+        bsp_lvgl_lock(-1);
+        lv_display_t *disp = lv_display_get_default();
+        for (int guard = 0; disp && guard < 10 && !lv_display_is_invalidation_enabled(disp); ++guard)
+            lv_display_enable_invalidation(disp, true);
+        bsp_lvgl_unlock();
+    }
+
     // Socket calls made by this long-lived caller lazily create a thread-local
     // semaphore. Once synchronous teardown has returned, no call is waiting on
     // it. Release it here so a tiny allocation cannot pin a session-sized hole.
@@ -477,10 +515,12 @@ void app_registry_dispatch_key(uint8_t btn, app_btn_event_t event, uint16_t mv) 
 
     // 2. 全局拦截:长按 OK = 整机统一的"返回",沿层级上移:
     //    子应用 → 应用板块 → 首页。首页已是顶层,长按无动作。
-    //    (后续所有 App 的交互设计都遵循这条语义,不再各自定义长按 OK。)
-    if (btn == BSP_BTN_OK && event == BTN_EVT_LONG) {
+    //    例外:相册有自己的层级(看图→列表→状态页),长按 OK 由相册
+    //    自己逐层返回,到状态页后再长按才上移到应用板块。
+    if (btn == BSP_BTN_OK && event == BTN_EVT_LONG && s_active_id != APP_ID_ALBUM) {
         if (s_active_id == APP_ID_WIFI) {
             s_ok_long_triggered = true;
+            app_registry_power_hold_disarm();
             if (wifi_setup_can_leave()) {
                 feedback(UI_SFX_BACK);
                 app_registry_switch_to(APP_ID_HOME);
@@ -490,6 +530,7 @@ void app_registry_dispatch_key(uint8_t btn, app_btn_event_t event, uint16_t mv) 
         if (s_active_id == APP_ID_LAUNCHER) {
             ESP_LOGI(TAG, "Back: Launcher -> Home");
             s_ok_long_triggered = true;
+            app_registry_power_hold_disarm();
             feedback(UI_SFX_BACK);
             app_registry_switch_to(APP_ID_HOME);
             return;
@@ -497,6 +538,7 @@ void app_registry_dispatch_key(uint8_t btn, app_btn_event_t event, uint16_t mv) 
         if (s_active_id != APP_ID_HOME) {
             ESP_LOGI(TAG, "Back: App -> Launcher");
             s_ok_long_triggered = true;
+            app_registry_power_hold_disarm();
             feedback(UI_SFX_BACK);
             app_registry_switch_to(APP_ID_LAUNCHER);
             return;
@@ -527,6 +569,17 @@ void app_registry_dispatch_key(uint8_t btn, app_btn_event_t event, uint16_t mv) 
         launcher_ui_on_key(btn, event);
     } else {
         const passport_app_t *app = app_registry_get_by_id(s_active_id);
+        // 应用自消费的长按 OK(相册逐层返回:看图→列表→状态页→应用板块)
+        // 同样终结本次按住的关机资格。必须在 on_key **之前**置位:状态页
+        // 长按走 switch_to→prepare_stop 的最长 20s 等待发生在 on_key 内部,
+        // 等返回再置位的话,扫描任务的 2s/5s 阶段点会先到,慢退出途中
+        // 持续按住仍会被关机。首页除外:首页不消费长按 OK,"按住 5s 关机"
+        // 正是留给首页/熄屏场景的出口。熄屏不置位:熄屏时长按是刻意的
+        // 关机手势,2s 提示会唤醒屏幕给予确认。
+        if (source != APP_ID_HOME && btn == BSP_BTN_OK && event == BTN_EVT_LONG &&
+            s_screen_on.load(std::memory_order_acquire)) {
+            app_registry_power_hold_disarm();
+        }
         if (app && app->on_key) {
             app->on_key(btn, event, mv);
         }

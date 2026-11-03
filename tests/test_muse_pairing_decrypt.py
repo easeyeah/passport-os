@@ -1,4 +1,5 @@
 """Check production decrypt buffer ownership, bounds and failure cleanup."""
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -88,9 +89,11 @@ int main(void) {
 with tempfile.TemporaryDirectory() as tmp:
     file = Path(tmp) / 'decrypt.c'
     file.write_text(prelude + decrypt + cases)
-    cjson = Path('/opt/esp-idf/components/json/cJSON')
+    cjson = Path(os.environ.get('IDF_PATH', '/opt/esp-idf')) / 'components/json/cJSON'
     binary = file.with_suffix('')
+    # macOS SDK 把 sprintf 标记为 deprecated,三方 cJSON 里挡不住;-Werror 只豁免这一项。
     subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-deprecated-declarations',
                     '-fsanitize=address,undefined', '-I' + str(cjson), str(file),
                     str(cjson / 'cJSON.c'), '-o', str(binary)], check=True)
     subprocess.run([str(binary)], check=True)

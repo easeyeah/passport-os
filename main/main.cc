@@ -23,6 +23,10 @@
 #include "passport_muse.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_task_wdt.h"
+#include "esp_rom_sys.h"
+#include "driver/usb_serial_jtag_vfs.h"
+#include "esp_private/freertos_debug.h"
 #include "esp_heap_caps.h"
 #include "bsp_memory.h"
 #include "lvgl.h"
@@ -137,6 +141,9 @@ static void button_task(void *arg) {
                 // 按下瞬间 (PRESS)
                 pressed_at = xTaskGetTickCount();
                 long_sent = false;
+                // 新的一次按住重新获得"2s 提示/5s 关机"资格(上一次按住若
+                // 在 0.8s 被导航消费,其 disarm 标志只作用于那一次按住)。
+                app_registry_power_hold_rearm();
                 KeyMessage msg = {
                     .button = static_cast<uint8_t>(stable),
                     .event = BTN_EVT_PRESS,
@@ -173,12 +180,19 @@ static void button_task(void *arg) {
 
         // Hold OK: 2 s shows "keep holding", 5 s powers off. The 0.8 s long
         // press has already gone back one level by then, which is harmless.
+        // 2026-11-03 修正:0.8s 的 LONG 若被导航消费(全局拦截/相册逐层返回),
+        // 同一次按住不再提示也不再关机——真机取证显示用户在层级返回途中
+        // 持续按住,5s 关机被当成"设备崩溃"。关机手势保留给首页与熄屏。
         if (stable == BSP_BTN_OK && power_stage < 2) {
             const TickType_t held = xTaskGetTickCount() - pressed_at;
             const uint8_t stage = held >= pdMS_TO_TICKS(5000) ? 2 : held >= pdMS_TO_TICKS(2000) ? 1 : 0;
             if (stage > power_stage) {
-                power_stage = stage;
-                key_post({kPowerCommand, BTN_EVT_CLICK, stage});
+                if (app_registry_power_hold_is_disarmed()) {
+                    power_stage = 2; // 本次按住已被导航消费:静默作废,不再检查
+                } else {
+                    power_stage = stage;
+                    key_post({kPowerCommand, BTN_EVT_CLICK, stage});
+                }
             }
         }
 
@@ -208,6 +222,7 @@ static void input_task(void *arg) {
             dispatch_input_message(msg);
         }
         app_registry_process_pending_switch();
+        esp_task_wdt_reset(); // 喂狗:本任务挂了 WDT,卡死时 5s 打印调用栈
     }
 }
 
@@ -276,6 +291,46 @@ static void handle_serial_command(int c) {
         } else {
             ESP_LOGW(TAG, "[SerialCmd] screenshot aborted: LVGL lock busy");
         }
+    } else if (c == 'F') {
+        // 冻结取证 v2:用任务快照(uxTaskGetSnapshotAll)拿每个任务的当前
+        // 栈指针,只扫描 [栈顶, 栈底] 的活动调用链——不带历史残留,v2 版
+        // 的整段扫描残留过多无法定位。主机端 addr2line 还原调用链。
+        constexpr uint32_t kTextLo1 = 0x40380000, kTextHi1 = 0x403e0000; // IRAM
+        constexpr uint32_t kTextLo2 = 0x42000000, kTextHi2 = 0x42600000; // flash text
+        static const char *const kTargets[] = {
+            "input_disp", "album_task", "album_sync",
+            "taskLVGL", "sys_mon", "ser_cmd", "IDLE",
+        };
+        ESP_LOGW(TAG, "[Coroner2] snapshot scan begin");
+        static const char *const kNames[] = {
+            "input_disp", "album_task", "album_sync",
+            "taskLVGL", "sys_mon", "ser_cmd", "IDLE", "IDLE0",
+        };
+        TaskIterator_t it = {}; // 文档要求全零初始化
+        int idx;
+        while ((idx = xTaskGetNext(&it)) != -1) {
+            const char *name = pcTaskGetName(it.pxTaskHandle);
+            bool hit = false;
+            for (const char *k : kNames)
+                if (name && strcmp(name, k) == 0) { hit = true; break; }
+            if (!hit) continue;
+            TaskSnapshot_t snap{};
+            if (vTaskGetSnapshot(it.pxTaskHandle, &snap) != pdTRUE) continue;
+            const uint32_t *top = reinterpret_cast<const uint32_t *>(snap.pxTopOfStack);
+            const uint32_t *end = reinterpret_cast<const uint32_t *>(snap.pxEndOfStack);
+            if (!top || !end || top >= end) continue;
+            ESP_LOGW(TAG, "[Coroner2] %s live-frames follow (%u words)",
+                     name, (unsigned)(end - top));
+            int printed = 0;
+            for (const uint32_t *p = top; p < end && printed < 300; ++p) {
+                const uint32_t w = *p;
+                if ((w >= kTextLo1 && w < kTextHi1) || (w >= kTextLo2 && w < kTextHi2)) {
+                    esp_rom_printf("F:%s:%p\n", name, (void *)w);
+                    ++printed;
+                }
+            }
+        }
+        ESP_LOGW(TAG, "[Coroner2] snapshot scan end");
     } else if (c == 'v') {
         bsp_battery_poll();
         bsp_battery_log_status();
@@ -329,6 +384,12 @@ static void serial_cmd_task(void *arg) {
 }
 
 extern "C" void app_main(void) {
+    // 控制台写入改非阻塞:USB-CDC 的主机端(电脑串口工具)若停止读取,
+    // 阻塞式写会在 CDC 缓冲塞满后永久挂起——持 newlib stdio 锁的任务被
+    // 钉死,所有要打印/分配的任务排队陪葬,整机冻结(2026-11-03 真机
+    // 取证实锤:sys_mon 卡在 vfprintf 持锁,album_task 卡在等同一把锁)。
+    // 非阻塞模式下缓冲满直接丢字符,日志少几行,永远不再拖死系统。
+    usb_serial_jtag_vfs_use_nonblocking();
     power_boot_check();    // 注:上电瞬间的白屏由 bootloader_components/bl_early 在二级 bootloader 里
     bsp_memory_init();
     // 就把 GPIO21 拉低解决(已实测 out=0/oe=1 一路保持到 app_main)。
@@ -351,10 +412,15 @@ extern "C" void app_main(void) {
     }
 
     ESP_LOGI(TAG, "=== FoloToy AI Passport OS Starting ===");
+    // 自动浅睡眠已关(2026-11-03):任务会卡死在 esp_pm_impl_waiti——浅睡眠
+    // 进出与 USB-CDC/面板高频活动竞争时,唤醒被错过,一睡十几分钟,表现为
+    // 界面/相册随机冻结,USB 总线一有活动又"自愈"。取证调用栈见
+    // troubleshooting-2026-11-02.md 第二十三轮。功耗代价:待机电流上升,
+    // 插电使用无感;待机时长问题可用"更深的显示熄屏"另行补偿。
     const esp_pm_config_t pm_config = { .max_freq_mhz = 160, .min_freq_mhz = 40,
-                                        .light_sleep_enable = true };
+                                        .light_sleep_enable = false };
     ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
-    ESP_LOGI(TAG, "Power management: DFS 40-160MHz, automatic light sleep enabled");
+    ESP_LOGI(TAG, "Power management: DFS 40-160MHz, automatic light sleep DISABLED (freeze fix)");
 
     // 1. NVS 初始化
     esp_err_t ret = nvs_flash_init();
@@ -438,6 +504,11 @@ extern "C" void app_main(void) {
                       s_input_stack, &s_system_tasks[1]);
     xTaskCreateStatic(serial_cmd_task, "ser_cmd", sizeof(s_serial_stack), NULL, 4,
                       s_serial_stack, &s_system_tasks[2]);
+
+    // 冻结取证:把 input_disp 挂上任务看门狗。它若卡死(如抱着 LVGL 锁
+    // 等待),5s 后 WDT 打印其调用栈到 console(配合串口采集器定位)。
+    // input_task 循环里有周期性 esp_task_wdt_reset(),正常短阻塞不误报。
+    if (TaskHandle_t h = xTaskGetHandle("input_disp")) esp_task_wdt_add(h);
 
     // 6. 启动系统监控心跳任务 (状态栏与统一息屏管理)
     xTaskCreateStatic(system_monitor_task, "sys_mon", sizeof(s_monitor_stack), NULL, 1,

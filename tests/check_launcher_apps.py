@@ -5,10 +5,11 @@ app_files = [
     'main/apps/radio/app_radio.cc',
     'main/apps/voice/app_voice.cc',
     'main/apps/xiaozhi/app_xiaozhi.cc',
-    'main/apps/game/app_game.cc',
     'main/apps/game/app_tetris.cc',
+    'main/apps/math24/app_math24.cc',
     'main/launcher/wifi_setup.cc',
     'main/launcher/settings.cc',
+    'main/apps/album/app_album.cc',
 ]
 
 from check_fonts import fonts

@@ -17,12 +17,14 @@ typedef enum {
     APP_ID_WIFI,
     APP_ID_SETTINGS,
     APP_ID_HOME,
-    APP_ID_GAME,
+    APP_ID_GAME, // 你在狗叫什么:2026-11-01 下线不打包,保留枚举位避免 ID 位移
     APP_ID_TETRIS,
     APP_ID_STOPWATCH,
     APP_ID_SOUND_JUMP,
     APP_ID_MUSE,
     APP_ID_POMODORO,
+    APP_ID_ALBUM,
+    APP_ID_MATH24,
     APP_ID_COUNT
 } passport_app_id_t;
 
@@ -34,7 +36,7 @@ typedef enum {
     BTN_EVT_LONG_UP,
 } app_btn_event_t;
 
-typedef struct {
+typedef struct passport_app {
     passport_app_id_t id;
     const char *name;           // 中文显示名称
     const char *en_name;        // 英文标签

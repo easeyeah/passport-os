@@ -66,8 +66,8 @@ static QueueHandle_t s_dispatch_queue=&queue_token;
 static BaseType_t queue_send(QueueHandle_t q,const void *item,unsigned ticks);
 #define xQueueSend queue_send
 static void stack_monitor_record(void *p) { (void)p; }
-static inline unsigned heap_caps_get_free_size(int c) { (void)c; return 20000; }
-static inline unsigned heap_caps_get_largest_free_block(int c) { (void)c; return 10000; }
+__attribute__((unused)) static inline unsigned heap_caps_get_free_size(int c) { (void)c; return 20000; }
+__attribute__((unused)) static inline unsigned heap_caps_get_largest_free_block(int c) { (void)c; return 10000; }
 static void mbedtls_platform_zeroize(void *p,size_t n) { memset(p,0,n); }
 static bool link_pairing_provisioning_session_valid(uint32_t g) { return session_valid && g==7; }
 static uint32_t link_pairing_mark_provisioning_active(void) { return generation; }
@@ -176,7 +176,8 @@ int main(void) {
             cjson = Path(os.environ.get('IDF_PATH', '/opt/esp-idf')) / 'components/json/cJSON'
             compiled = subprocess.run([
                 os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                '-Wno-unused-parameter', '-fsanitize=address,undefined',
+                '-Wno-unused-parameter', '-Wno-deprecated-declarations', # macOS 弃用 sprintf,三方 cJSON 挡不住
+                '-fsanitize=address,undefined',
                 '-I', str(cjson), str(c), str(cjson / 'cJSON.c'), '-o', str(binary)
             ], capture_output=True, text=True)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
