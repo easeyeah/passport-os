@@ -43,8 +43,17 @@ object AlbumStore {
     @Volatile var onPhaseChanged: (() -> Unit)? = null
 
     private lateinit var appContext: Context
-    var cameraOnly = true
+    // 照片范围:camera=DCIM/Camera(默认),all=全部图片,custom=用户选的文件夹
+    var scopeMode = "camera"
         private set
+    var customRelPath = ""
+        private set
+    val scopeDesc: String
+        get() = when {
+            scopeMode == "custom" && customRelPath.isNotEmpty() -> "自定义目录 ${customRelPath.trimEnd('/')}"
+            scopeMode == "all" -> "手机全部图片"
+            else -> "相机照片"
+        }
     private val syncLock = Any()
     private var lastSyncAt = 0L
     private val syncing = AtomicBoolean(false)
@@ -58,14 +67,18 @@ object AlbumStore {
         File(context.filesDir, "web").apply { mkdirs() }
 
     fun loadPrefs(context: Context) {
-        cameraOnly = context.getSharedPreferences("album", Context.MODE_PRIVATE)
-            .getBoolean("camera_only", true)
+        val p = context.getSharedPreferences("album", Context.MODE_PRIVATE)
+        scopeMode = p.getString("scope_mode", "camera") ?: "camera"
+        customRelPath = p.getString("custom_rel_path", "") ?: ""
     }
 
-    fun setCameraOnly(context: Context, value: Boolean) {
-        cameraOnly = value
+    fun setScope(context: Context, mode: String, relPath: String = "") {
+        scopeMode = mode
+        customRelPath = relPath
         context.getSharedPreferences("album", Context.MODE_PRIVATE).edit()
-            .putBoolean("camera_only", value).apply()
+            .putString("scope_mode", mode)
+            .putString("custom_rel_path", relPath)
+            .apply()
         syncAsync()
     }
 
@@ -112,7 +125,7 @@ object AlbumStore {
             val thumbs = File(web, "thumbs").apply { mkdirs() }
 
             val sources = queryPhotos()
-            Log.d(TAG, "runSync query=${sources.size} cameraOnly=$cameraOnly")
+            Log.d(TAG, "runSync query=${sources.size} scope=$scopeMode path=$customRelPath")
             val seen = HashMap<String, Int>()
 
             // 设备清单池按档位 16K/12K/8K/4K 堆分配(2026-11-03 固件升级后),
@@ -218,17 +231,22 @@ object AlbumStore {
             "'image/bmp','image/x-ms-bmp','image/heic','image/heif')"
         val selection: String
         val args: Array<String>?
-        if (cameraOnly) {
-            if (Build.VERSION.SDK_INT >= 29) {
+        when {
+            // 自定义文件夹:含其全部子文件夹;需 Android 10+(relative_path 列)
+            scopeMode == "custom" && customRelPath.isNotEmpty() && Build.VERSION.SDK_INT >= 29 -> {
                 selection = "$mimeIn AND relative_path LIKE ?"
-                args = arrayOf("DCIM/Camera%")
-            } else {
-                selection = "$mimeIn AND bucket_display_name LIKE ?"
-                args = arrayOf("Camera%")
+                args = arrayOf("$customRelPath%")
             }
-        } else {
-            selection = mimeIn
-            args = null
+            scopeMode == "all" -> {
+                selection = mimeIn
+                args = null
+            }
+            else -> { // 相机(默认;旧系统无 relative_path,按相册名匹配)
+                selection =
+                    if (Build.VERSION.SDK_INT >= 29) "$mimeIn AND relative_path LIKE ?"
+                    else "$mimeIn AND bucket_display_name LIKE ?"
+                args = arrayOf(if (Build.VERSION.SDK_INT >= 29) "DCIM/Camera%" else "Camera%")
+            }
         }
         appContext.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,

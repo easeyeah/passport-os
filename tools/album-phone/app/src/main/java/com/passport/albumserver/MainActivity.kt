@@ -10,10 +10,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
+import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.ScrollView
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 
@@ -25,7 +27,11 @@ class MainActivity : Activity() {
     private lateinit var statusView: TextView
     private lateinit var urlView: TextView
     private lateinit var toggle: Button
-    private lateinit var scopeSwitch: Switch
+    private lateinit var scopeGroup: RadioGroup
+    private lateinit var rbCamera: RadioButton
+    private lateinit var rbAll: RadioButton
+    private lateinit var rbCustom: RadioButton
+    private lateinit var pickBtn: Button
     private val handler = Handler(Looper.getMainLooper())
     private var pendingStart = false
 
@@ -40,11 +46,54 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         AlbumStore.loadPrefs(this)
         setContentView(buildUi())
-        scopeSwitch.isChecked = AlbumStore.cameraOnly
-        scopeSwitch.setOnCheckedChangeListener { _, checked ->
-            AlbumStore.setCameraOnly(this, checked)
+        when (AlbumStore.scopeMode) {
+            "all" -> scopeGroup.check(rbAll.id)
+            "custom" -> scopeGroup.check(rbCustom.id)
+            else -> scopeGroup.check(rbCamera.id)
+        }
+        if (AlbumStore.customRelPath.isNotEmpty()) {
+            pickBtn.text = "当前目录:${AlbumStore.customRelPath.trimEnd('/')}\n点此重新选择"
+        }
+        pickBtn.visibility = if (AlbumStore.scopeMode == "custom") View.VISIBLE else View.GONE
+        scopeGroup.setOnCheckedChangeListener { _, checkedId ->
+            pickBtn.visibility = if (checkedId == rbCustom.id) View.VISIBLE else View.GONE
+            when (checkedId) {
+                rbAll.id -> AlbumStore.setScope(this, "all")
+                rbCustom.id ->
+                    if (AlbumStore.customRelPath.isNotEmpty())
+                        AlbumStore.setScope(this, "custom", AlbumStore.customRelPath)
+                else -> AlbumStore.setScope(this, "camera")
+            }
+        }
+        pickBtn.setOnClickListener {
+            startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), 42)
         }
         toggle.setOnClickListener { onToggle() }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 42 || resultCode != RESULT_OK) return
+        val uri = data?.data ?: return
+        val rel = relPathFromTreeUri(uri)
+        if (rel.isNullOrEmpty()) {
+            Toast.makeText(this, "请选择手机内部存储里的某个文件夹(不要选根目录)", Toast.LENGTH_LONG).show()
+            return
+        }
+        AlbumStore.setScope(this, "custom", rel)
+        pickBtn.text = "当前目录:${rel.trimEnd('/')}\n点此重新选择"
+        Toast.makeText(this, "照片目录已切换:$rel", Toast.LENGTH_LONG).show()
+    }
+
+    /** SAF 目录树 URI → 媒体库 relative_path(如 Pictures/passport/)。
+     *  仅支持内部存储(primary);返回 null 表示选了外部卡或根目录。 */
+    private fun relPathFromTreeUri(uri: android.net.Uri): String? {
+        val path = uri.path ?: return null // /tree/primary:Pictures/x
+        val m = Regex("/tree/([^:/]+):(.+)").find(path) ?: return null
+        if (m.groupValues[1] != "primary") return null
+        val rel = m.groupValues[2].trim('/')
+        if (rel.isEmpty()) return null
+        return "$rel/"
     }
 
     override fun onResume() {
@@ -90,12 +139,20 @@ class MainActivity : Activity() {
         col.addView(urlView)
 
         col.addView(TextView(this).apply {
-            text = "\n照片范围"
+            text = "\n照片范围(改动后设备端下一次刷新生效)"
             textSize = 15f
             setPadding(0, dp(14), 0, dp(4))
         })
-        scopeSwitch = Switch(this).apply { text = "只收录相机拍摄的照片(推荐)" }
-        col.addView(scopeSwitch)
+        scopeGroup = RadioGroup(this)
+        rbCamera = RadioButton(this).apply { text = "只收录相机拍摄的照片(推荐)" }
+        rbAll = RadioButton(this).apply { text = "收录手机全部图片" }
+        rbCustom = RadioButton(this).apply { text = "只收录我选的文件夹" }
+        scopeGroup.addView(rbCamera)
+        scopeGroup.addView(rbAll)
+        scopeGroup.addView(rbCustom)
+        col.addView(scopeGroup)
+        pickBtn = Button(this).apply { text = "选择文件夹…" }
+        col.addView(pickBtn)
 
         toggle = Button(this).apply {
             textSize = 18f
@@ -132,6 +189,7 @@ class MainActivity : Activity() {
         statusView.text = buildString {
             append(if (running) "状态:${AlbumStore.phase}" else "状态:未启动")
             AlbumStore.cappedInfo?.let { append("\n$it") }
+            append("\n照片范围:${AlbumStore.scopeDesc}")
         }
         val sb = StringBuilder()
         if (running) {
